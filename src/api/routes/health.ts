@@ -1,6 +1,9 @@
 import { FastifyInstance } from "fastify";
 import { prisma } from "../../db/client";
 
+const BUILD_TIME = new Date().toISOString();
+const BUILD_ID = `build-${Date.now()}`;
+
 export async function healthRoutes(app: FastifyInstance): Promise<void> {
   app.get("/health", async (_req, reply) => {
     const start = Date.now();
@@ -18,7 +21,8 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
 
     return reply.status(code).send({
       app: "netsuite-sync",
-      version: "debug-routes-v1",
+      buildId: BUILD_ID,
+      buildTime: BUILD_TIME,
       status,
       uptime: process.uptime(),
       timestamp: new Date().toISOString(),

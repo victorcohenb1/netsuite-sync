@@ -66,5 +66,12 @@ export async function buildServer() {
     });
   });
 
+  // Log all registered routes on startup for debugging deploys
+  app.addHook("onReady", () => {
+    logger.info("=== REGISTERED ROUTES ===");
+    logger.info(app.printRoutes({ commonPrefix: false }));
+    logger.info("=========================");
+  });
+
   return app;
 }
