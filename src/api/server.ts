@@ -60,5 +60,11 @@ export async function buildServer() {
   await app.register(debugRoutes);
   await app.register(searchRoutes);
 
+  app.get("/routes", async (_req, reply) => {
+    return reply.send({
+      routes: app.printRoutes({ commonPrefix: false }),
+    });
+  });
+
   return app;
 }

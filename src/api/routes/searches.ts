@@ -10,13 +10,10 @@ const runSearchBodySchema = z.object({
 });
 
 export async function searchRoutes(app: FastifyInstance): Promise<void> {
-  /**
-   * POST /searches/run
-   *
-   * Execute any NetSuite saved search by ID.
-   * Not tied to the dataset registry — supports ad-hoc searches
-   * from Google Sheets sidebar or any other client.
-   */
+  app.get("/ping-searches", async (_req, reply) => {
+    return reply.send({ ok: true, message: "searches plugin is mounted" });
+  });
+
   app.post("/searches/run", async (req, reply) => {
     const body = runSearchBodySchema.parse(req.body);
 
