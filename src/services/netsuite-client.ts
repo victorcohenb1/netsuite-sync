@@ -75,7 +75,7 @@ export async function executeSuiteQL(
     const data = body as { items?: Record<string, unknown>[]; hasMore?: boolean };
     const rows = data.items ?? [];
     allRows.push(...rows);
-    hasMore = data.hasMore === true && rows.length === limit;
+    hasMore = !!data.hasMore && rows.length === limit;
     offset += rows.length;
 
     log.debug({ offset, fetched: rows.length, hasMore }, "SuiteQL page fetched");
@@ -128,7 +128,7 @@ export async function executeSavedSearch(
     const rows = data.items ?? [];
     totalResults = data.totalResults ?? totalResults;
     allRows.push(...rows);
-    hasMore = data.hasMore === true && rows.length === limit;
+    hasMore = !!data.hasMore && rows.length === limit;
     offset += rows.length;
 
     log.info(
@@ -170,58 +170,95 @@ export async function restletCsvExport(
   const folderId = env.NETSUITE_CSV_FOLDER_ID;
   const pageSize = 1000;
 
-  // ── Step 1: POST mode=search ─────────────────────────
-
-  const searchPayload = {
-    mode: "search",
-    searchId,
-    pageSize,
-    pageIndex: 0,
-    csvFolderId: folderId,
-  };
+  // ── Step 1: POST mode=search (with pagination) ───────
 
   log.info(
     { searchId, datasetKey, folderId, pageSize },
     "RESTlet CSV export — POST search START"
   );
 
-  const searchResponse = await withRetry(
-    async () => {
-      const headers = signRestletRequest(restletUrl, "POST");
-      const res = await fetch(restletUrl, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(searchPayload),
-      });
-      return handleResponse(res, `RESTletSearch[${searchId}]`);
-    },
-    { attempts: env.SYNC_RETRY_ATTEMPTS, delayMs: env.SYNC_RETRY_DELAY_MS },
-    log
-  );
+  let allRows: Record<string, unknown>[] = [];
+  let pageIndex = 0;
+  let isCsvTask = false;
+  let csvTaskData: Record<string, unknown> = {};
 
-  const searchData = searchResponse as Record<string, unknown>;
-
-  log.info(
-    {
+  // Paginate through direct responses from the RESTlet
+  while (true) {
+    const searchPayload = {
+      mode: "search",
       searchId,
-      responseMode: searchData.mode,
-      ok: searchData.ok,
-      taskStatus: searchData.taskStatus,
-      hasTaskId: !!searchData.taskId,
-      hasRows: Array.isArray(searchData.rows) || Array.isArray(searchData.data),
-    },
-    "RESTlet CSV export — POST search END"
-  );
+      pageSize,
+      pageIndex,
+      csvFolderId: folderId,
+    };
 
-  // If search succeeded directly (runPaged or getRange returned rows)
-  if (searchData.mode !== "csvTask") {
-    const rows = extractRowsFromResponse(searchData);
+    const searchResponse = await withRetry(
+      async () => {
+        const headers = signRestletRequest(restletUrl, "POST");
+        const res = await fetch(restletUrl, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(searchPayload),
+        });
+        return handleResponse(res, `RESTletSearch[${searchId}]`);
+      },
+      { attempts: env.SYNC_RETRY_ATTEMPTS, delayMs: env.SYNC_RETRY_DELAY_MS },
+      log
+    );
+
+    const searchData = searchResponse as Record<string, unknown>;
+
     log.info(
-      { searchId, rowCount: rows.length, responseMode: searchData.mode },
+      {
+        searchId,
+        pageIndex,
+        responseMode: searchData.mode,
+        ok: searchData.ok,
+        taskStatus: searchData.taskStatus,
+        hasTaskId: !!searchData.taskId,
+        hasRows: Array.isArray(searchData.rows) || Array.isArray(searchData.data),
+      },
+      "RESTlet CSV export — POST search END"
+    );
+
+    // If RESTlet kicked off a CSV task, break out to the polling loop
+    if (searchData.mode === "csvTask") {
+      isCsvTask = true;
+      csvTaskData = searchData;
+      break;
+    }
+
+    // Direct response — collect rows and paginate
+    const rows = extractRowsFromResponse(searchData);
+    allRows.push(...rows);
+
+    log.info(
+      { searchId, pageIndex, pageRows: rows.length, cumulativeRows: allRows.length },
       "RESTlet CSV export — search returned rows directly"
     );
-    return { rows, totalResults: rows.length };
+
+    // Stop if we got fewer rows than pageSize (last page)
+    if (rows.length < pageSize) break;
+
+    pageIndex++;
+
+    // Safety cap to prevent infinite loops
+    if (pageIndex > 500) {
+      log.warn({ searchId, pageIndex }, "RESTlet CSV export — hit max page cap");
+      break;
+    }
   }
+
+  // If all pages were fetched directly, return them
+  if (!isCsvTask) {
+    log.info(
+      { searchId, totalRows: allRows.length, pages: pageIndex + 1 },
+      "RESTlet CSV export — all pages fetched directly"
+    );
+    return { rows: allRows, totalResults: allRows.length };
+  }
+
+  const searchData = csvTaskData;
 
   // ── Step 2: CSV task created → poll until COMPLETE ───
 
