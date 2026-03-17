@@ -101,6 +101,32 @@ enum SyncTrigger {
   RETRY
 }
 
+// ─── Cached Searches (Option B) ──────────────────────────
+
+model CachedSearch {
+  id             String             @id @default(cuid())
+  searchId       String             @unique @map("search_id")
+  columns        Json               @default("[]")
+  rows           Json               @default("[]")
+  totalResults   Int                @default(0) @map("total_results")
+  lastSyncAt     DateTime?          @map("last_sync_at")
+  syncDurationMs Int?               @map("sync_duration_ms")
+  status         CachedSearchStatus @default(IDLE)
+  errorMessage   String?            @map("error_message")
+  cronSchedule   String             @default("0 */2 * * *") @map("cron_schedule")
+  enabled        Boolean            @default(true)
+  createdAt      DateTime           @default(now()) @map("created_at")
+  updatedAt      DateTime           @updatedAt @map("updated_at")
+
+  @@map("cached_searches")
+}
+
+enum CachedSearchStatus {
+  IDLE
+  SYNCING
+  FAILED
+}
+
 // ─── Data Tables ───────────────────────────────────────
 
 model CustomerOrderOpen {
