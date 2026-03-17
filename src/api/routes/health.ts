@@ -17,6 +17,8 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
     const code = dbOk ? 200 : 503;
 
     return reply.status(code).send({
+      app: "netsuite-sync",
+      version: "debug-routes-v1",
       status,
       uptime: process.uptime(),
       timestamp: new Date().toISOString(),
