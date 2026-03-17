@@ -1,0 +1,202 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Dataset Registry ──────────────────────────────────
+
+model Dataset {
+  id             String          @id @default(cuid())
+  key            String          @unique
+  label          String
+  savedSearchId  String          @map("saved_search_id")
+  extractionMode ExtractionMode  @default(STANDARD) @map("extraction_mode")
+  targetTable    String          @map("target_table")
+  cronSchedule   String          @default("0 */4 * * *") @map("cron_schedule")
+  enabled        Boolean         @default(true)
+  createdAt      DateTime        @default(now()) @map("created_at")
+  updatedAt      DateTime        @updatedAt @map("updated_at")
+
+  syncJobs SyncJob[]
+
+  @@map("datasets")
+}
+
+enum ExtractionMode {
+  STANDARD
+  CSV_EXPORT
+  STANDARD_WITH_CSV_FALLBACK
+}
+
+// ─── Sync Tracking ─────────────────────────────────────
+
+model SyncJob {
+  id        String    @id @default(cuid())
+  datasetId String    @map("dataset_id")
+  status    SyncStatus @default(PENDING)
+  trigger   SyncTrigger @default(SCHEDULED)
+  startedAt DateTime?  @map("started_at")
+  finishedAt DateTime? @map("finished_at")
+  durationMs Int?      @map("duration_ms")
+  createdAt DateTime   @default(now()) @map("created_at")
+
+  dataset  Dataset    @relation(fields: [datasetId], references: [id])
+  runs     SyncRun[]
+  errors   SyncError[]
+
+  @@index([datasetId, createdAt])
+  @@map("sync_jobs")
+}
+
+model SyncRun {
+  id          String    @id @default(cuid())
+  jobId       String    @map("job_id")
+  attempt     Int       @default(1)
+  method      ExtractionMode
+  status      SyncStatus @default(RUNNING)
+  rowsFound   Int?      @map("rows_found")
+  rowsWritten Int?      @map("rows_written")
+  startedAt   DateTime  @default(now()) @map("started_at")
+  finishedAt  DateTime? @map("finished_at")
+  durationMs  Int?      @map("duration_ms")
+
+  job    SyncJob    @relation(fields: [jobId], references: [id])
+  errors SyncError[]
+
+  @@index([jobId])
+  @@map("sync_runs")
+}
+
+model SyncError {
+  id        String   @id @default(cuid())
+  jobId     String   @map("job_id")
+  runId     String?  @map("run_id")
+  code      String?
+  message   String
+  stack     String?
+  context   Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  job SyncJob  @relation(fields: [jobId], references: [id])
+  run SyncRun? @relation(fields: [runId], references: [id])
+
+  @@index([jobId])
+  @@map("sync_errors")
+}
+
+enum SyncStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum SyncTrigger {
+  SCHEDULED
+  MANUAL
+  RETRY
+}
+
+// ─── Data Tables ───────────────────────────────────────
+
+model CustomerOrderOpen {
+  id              String   @id @default(cuid())
+  externalId      String?  @map("external_id")
+  orderNumber     String?  @map("order_number")
+  customerName    String?  @map("customer_name")
+  customerId      String?  @map("customer_id")
+  itemName        String?  @map("item_name")
+  itemId          String?  @map("item_id")
+  quantity        Float?
+  rate            Float?
+  amount          Float?
+  status          String?
+  orderDate       DateTime? @map("order_date")
+  shipDate        DateTime? @map("ship_date")
+  location        String?
+  memo            String?
+  rawData         Json?    @map("raw_data")
+  syncJobId       String?  @map("sync_job_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([orderNumber])
+  @@index([customerId])
+  @@index([syncJobId])
+  @@map("customer_orders_open")
+}
+
+model PurchaseOrderOpen {
+  id              String   @id @default(cuid())
+  externalId      String?  @map("external_id")
+  orderNumber     String?  @map("order_number")
+  vendorName      String?  @map("vendor_name")
+  vendorId        String?  @map("vendor_id")
+  itemName        String?  @map("item_name")
+  itemId          String?  @map("item_id")
+  quantity        Float?
+  rate            Float?
+  amount          Float?
+  status          String?
+  orderDate       DateTime? @map("order_date")
+  expectedDate    DateTime? @map("expected_date")
+  location        String?
+  memo            String?
+  rawData         Json?    @map("raw_data")
+  syncJobId       String?  @map("sync_job_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([orderNumber])
+  @@index([vendorId])
+  @@index([syncJobId])
+  @@map("purchase_orders_open")
+}
+
+model TransferOrderOpen {
+  id              String   @id @default(cuid())
+  externalId      String?  @map("external_id")
+  orderNumber     String?  @map("order_number")
+  fromLocation    String?  @map("from_location")
+  toLocation      String?  @map("to_location")
+  itemName        String?  @map("item_name")
+  itemId          String?  @map("item_id")
+  quantity        Float?
+  quantityShipped Float?   @map("quantity_shipped")
+  quantityReceived Float?  @map("quantity_received")
+  status          String?
+  orderDate       DateTime? @map("order_date")
+  shipDate        DateTime? @map("ship_date")
+  memo            String?
+  rawData         Json?    @map("raw_data")
+  syncJobId       String?  @map("sync_job_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([orderNumber])
+  @@index([syncJobId])
+  @@map("transfer_orders_open")
+}
+
+model InventoryByLocation {
+  id              String   @id @default(cuid())
+  externalId      String?  @map("external_id")
+  itemName        String?  @map("item_name")
+  itemId          String?  @map("item_id")
+  location        String?
+  locationId      String?  @map("location_id")
+  quantityOnHand  Float?   @map("quantity_on_hand")
+  quantityAvailable Float? @map("quantity_available")
+  quantityOnOrder Float?   @map("quantity_on_order")
+  quantityInTransit Float? @map("quantity_in_transit")
+  reorderPoint    Float?   @map("reorder_point")
+  rawData         Json?    @map("raw_data")
+  syncJobId       String?  @map("sync_job_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([itemId])
+  @@index([locationId])
+  @@index([syncJobId])
+  @@map("inventory_by_location")
+}

@@ -1,0 +1,324 @@
+import fetch, { Response } from "node-fetch";
+import { signRequest, signRestletRequest, getSuiteQLUrl } from "./netsuite-auth";
+import { env } from "../config/env";
+import { childLogger } from "../lib/logger";
+import { withRetry } from "../lib/retry";
+
+const log = childLogger({ module: "netsuite-client" });
+
+export interface SearchResult {
+  rows: Record<string, unknown>[];
+  totalResults: number;
+  hasMore: boolean;
+}
+
+export interface CsvExportResult {
+  rows: Record<string, unknown>[];
+  totalResults: number;
+}
+
+class NetSuiteApiError extends Error {
+  constructor(
+    message: string,
+    public statusCode: number,
+    public responseBody?: string
+  ) {
+    super(message);
+    this.name = "NetSuiteApiError";
+  }
+}
+
+async function handleResponse(res: Response, context: string): Promise<unknown> {
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new NetSuiteApiError(
+      `${context}: HTTP ${res.status} ${res.statusText}`,
+      res.status,
+      body
+    );
+  }
+  return res.json();
+}
+
+/**
+ * Execute a SuiteQL query against NetSuite REST API with automatic pagination.
+ */
+export async function executeSuiteQL(
+  query: string,
+  limit = 1000
+): Promise<Record<string, unknown>[]> {
+  const allRows: Record<string, unknown>[] = [];
+  let offset = 0;
+  let hasMore = true;
+
+  while (hasMore) {
+    const url = getSuiteQLUrl();
+    const paginatedQuery = `${query} OFFSET ${offset} FETCH NEXT ${limit} ROWS ONLY`;
+    const headers = signRequest(url, "POST");
+
+    const body = await withRetry(
+      async () => {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { ...headers, Prefer: "transient" },
+          body: JSON.stringify({ q: paginatedQuery }),
+        });
+        return handleResponse(res, "SuiteQL");
+      },
+      {
+        attempts: env.SYNC_RETRY_ATTEMPTS,
+        delayMs: env.SYNC_RETRY_DELAY_MS,
+      },
+      log
+    );
+
+    const data = body as { items?: Record<string, unknown>[]; hasMore?: boolean };
+    const rows = data.items ?? [];
+    allRows.push(...rows);
+    hasMore = data.hasMore === true && rows.length === limit;
+    offset += rows.length;
+
+    log.debug({ offset, fetched: rows.length, hasMore }, "SuiteQL page fetched");
+  }
+
+  return allRows;
+}
+
+/**
+ * Execute a saved search via the NetSuite REST Web Services API with pagination.
+ */
+export async function executeSavedSearch(
+  searchId: string
+): Promise<SearchResult> {
+  const allRows: Record<string, unknown>[] = [];
+  let offset = 0;
+  const limit = 1000;
+  let hasMore = true;
+  let totalResults = 0;
+  let pageNum = 0;
+
+  log.info({ searchId }, "Saved search execution START");
+  const searchStart = Date.now();
+
+  while (hasMore) {
+    pageNum++;
+    const url = `${env.NETSUITE_REST_BASE_URL}/record/v1/search/${searchId}?limit=${limit}&offset=${offset}`;
+    const headers = signRequest(url, "GET");
+
+    log.info({ searchId, page: pageNum, offset, limit }, "Fetching saved search page");
+
+    const body = await withRetry(
+      async () => {
+        const res = await fetch(url, { method: "GET", headers });
+        return handleResponse(res, `SavedSearch[${searchId}]`);
+      },
+      {
+        attempts: env.SYNC_RETRY_ATTEMPTS,
+        delayMs: env.SYNC_RETRY_DELAY_MS,
+      },
+      log
+    );
+
+    const data = body as {
+      items?: Record<string, unknown>[];
+      totalResults?: number;
+      hasMore?: boolean;
+    };
+
+    const rows = data.items ?? [];
+    totalResults = data.totalResults ?? totalResults;
+    allRows.push(...rows);
+    hasMore = data.hasMore === true && rows.length === limit;
+    offset += rows.length;
+
+    log.info(
+      { searchId, page: pageNum, fetched: rows.length, cumulativeRows: allRows.length, totalResults, hasMore },
+      "Saved search page received"
+    );
+  }
+
+  const searchDuration = Date.now() - searchStart;
+  log.info(
+    { searchId, totalRows: allRows.length, totalResults, pages: pageNum, durationMs: searchDuration },
+    "Saved search execution END"
+  );
+
+  return { rows: allRows, totalResults, hasMore: false };
+}
+
+/**
+ * Execute search via the custom RESTlet (POST-based).
+ *
+ * Contract:
+ *  1. POST { mode: "search", searchId, pageSize, pageIndex, csvFolderId }
+ *     RESTlet tries runPaged → getRange → CSV export task.
+ *     - If search succeeds: returns rows as JSON directly.
+ *     - If CSV task created: { ok, mode: "csvTask", taskStatus: "PENDING", taskId, fileId }
+ *
+ *  2. POST { mode: "taskStatus", taskId, fileId, pageSize, pageIndex }
+ *     Poll until taskStatus === "COMPLETE".
+ *     COMPLETE response contains CSV rows already parsed to JSON.
+ */
+export async function restletCsvExport(
+  searchId: string,
+  datasetKey: string
+): Promise<CsvExportResult> {
+  const restletUrl = process.env.NETSUITE_CSV_RESTLET_URL;
+  if (!restletUrl) {
+    throw new Error("NETSUITE_CSV_RESTLET_URL is not configured");
+  }
+  const folderId = env.NETSUITE_CSV_FOLDER_ID;
+  const pageSize = 1000;
+
+  // ── Step 1: POST mode=search ─────────────────────────
+
+  const searchPayload = {
+    mode: "search",
+    searchId,
+    pageSize,
+    pageIndex: 0,
+    csvFolderId: folderId,
+  };
+
+  log.info(
+    { searchId, datasetKey, folderId, pageSize },
+    "RESTlet CSV export — POST search START"
+  );
+
+  const searchResponse = await withRetry(
+    async () => {
+      const headers = signRestletRequest(restletUrl, "POST");
+      const res = await fetch(restletUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(searchPayload),
+      });
+      return handleResponse(res, `RESTletSearch[${searchId}]`);
+    },
+    { attempts: env.SYNC_RETRY_ATTEMPTS, delayMs: env.SYNC_RETRY_DELAY_MS },
+    log
+  );
+
+  const searchData = searchResponse as Record<string, unknown>;
+
+  log.info(
+    {
+      searchId,
+      responseMode: searchData.mode,
+      ok: searchData.ok,
+      taskStatus: searchData.taskStatus,
+      hasTaskId: !!searchData.taskId,
+      hasRows: Array.isArray(searchData.rows) || Array.isArray(searchData.data),
+    },
+    "RESTlet CSV export — POST search END"
+  );
+
+  // If search succeeded directly (runPaged or getRange returned rows)
+  if (searchData.mode !== "csvTask") {
+    const rows = extractRowsFromResponse(searchData);
+    log.info(
+      { searchId, rowCount: rows.length, responseMode: searchData.mode },
+      "RESTlet CSV export — search returned rows directly"
+    );
+    return { rows, totalResults: rows.length };
+  }
+
+  // ── Step 2: CSV task created → poll until COMPLETE ───
+
+  const taskId = searchData.taskId as string;
+  const fileId = (searchData.fileId as string) ?? "";
+
+  if (!taskId) {
+    throw new Error(
+      `RESTlet csvTask response missing taskId. Response: ${JSON.stringify(searchData)}`
+    );
+  }
+
+  log.info(
+    { searchId, taskId, fileId, taskStatus: searchData.taskStatus },
+    "RESTlet CSV export — CSV task created, starting poll loop"
+  );
+
+  const maxWaitMs = 180_000;
+  const pollIntervalMs = 5_000;
+  const pollStart = Date.now();
+  let pollAttempt = 0;
+
+  while (Date.now() - pollStart < maxWaitMs) {
+    pollAttempt++;
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
+
+    const pollPayload = {
+      mode: "taskStatus",
+      taskId,
+      fileId,
+      pageSize,
+      pageIndex: 0,
+    };
+
+    log.info(
+      { taskId, pollAttempt, elapsedMs: Date.now() - pollStart },
+      "RESTlet CSV export — poll POST START"
+    );
+
+    const pollResponse = await withRetry(
+      async () => {
+        const headers = signRestletRequest(restletUrl, "POST");
+        const res = await fetch(restletUrl, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(pollPayload),
+        });
+        return handleResponse(res, `RESTletPoll[${taskId}]`);
+      },
+      { attempts: 2, delayMs: 1000 },
+      log
+    );
+
+    const pollData = pollResponse as Record<string, unknown>;
+    const status = String(pollData.taskStatus ?? "UNKNOWN").toUpperCase();
+
+    log.info(
+      {
+        taskId,
+        pollAttempt,
+        taskStatus: status,
+        ok: pollData.ok,
+        hasRows: Array.isArray(pollData.rows) || Array.isArray(pollData.data),
+        elapsedMs: Date.now() - pollStart,
+      },
+      "RESTlet CSV export — poll POST END"
+    );
+
+    if (status === "COMPLETE") {
+      const rows = extractRowsFromResponse(pollData);
+      log.info(
+        { taskId, pollAttempt, rowCount: rows.length },
+        "RESTlet CSV export — task COMPLETE, rows received"
+      );
+      return { rows, totalResults: rows.length };
+    }
+
+    if (status === "FAILED") {
+      throw new Error(
+        `RESTlet CSV task ${taskId} FAILED. Response: ${JSON.stringify(pollData)}`
+      );
+    }
+
+    // PENDING or PROCESSING — continue polling
+  }
+
+  throw new Error(
+    `RESTlet CSV task ${taskId} timed out after ${maxWaitMs}ms (${pollAttempt} polls)`
+  );
+}
+
+function extractRowsFromResponse(
+  data: Record<string, unknown>
+): Record<string, unknown>[] {
+  if (Array.isArray(data.rows)) return data.rows;
+  if (Array.isArray(data.data)) return data.data;
+  if (Array.isArray(data.results)) return data.results;
+  if (Array.isArray(data.items)) return data.items;
+  return [];
+}
