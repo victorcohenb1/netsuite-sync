@@ -368,6 +368,63 @@ export async function restletCsvExport(
   );
 }
 
+/**
+ * Fetch a SINGLE page from the RESTlet — no accumulation, returns immediately.
+ * Apps Script calls this repeatedly with incrementing pageIndex.
+ */
+export async function restletSinglePage(
+  searchId: string,
+  pageIndex: number,
+  pageSize: number = 1000
+): Promise<{
+  rows: Record<string, unknown>[];
+  columns: string[];
+  total: number;
+  hasMore: boolean;
+  pageIndex: number;
+}> {
+  const restletUrl = process.env.NETSUITE_CSV_RESTLET_URL;
+  if (!restletUrl) {
+    throw new Error("NETSUITE_CSV_RESTLET_URL is not configured");
+  }
+
+  const payload = {
+    mode: "search",
+    searchId,
+    pageSize,
+    pageIndex,
+  };
+
+  log.info({ searchId, pageIndex, pageSize }, "RESTlet single page START");
+
+  const response = await withRetry(
+    async () => {
+      const headers = signRestletRequest(restletUrl, "POST");
+      const res = await fetch(restletUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+      });
+      return handleResponse(res, `RESTletPage[${searchId}][${pageIndex}]`);
+    },
+    { attempts: env.SYNC_RETRY_ATTEMPTS, delayMs: env.SYNC_RETRY_DELAY_MS },
+    log
+  );
+
+  const data = response as Record<string, unknown>;
+  const rows = extractRowsFromResponse(data);
+  const columns = Array.isArray(data.columns) ? (data.columns as string[]) : (rows.length > 0 ? Object.keys(rows[0]) : []);
+  const total = typeof data.total === "number" ? data.total : 0;
+  const hasMore = !!data.hasMore;
+
+  log.info(
+    { searchId, pageIndex, rowCount: rows.length, total, hasMore },
+    "RESTlet single page END"
+  );
+
+  return { rows, columns, total, hasMore, pageIndex };
+}
+
 function extractRowsFromResponse(
   data: Record<string, unknown>
 ): Record<string, unknown>[] {

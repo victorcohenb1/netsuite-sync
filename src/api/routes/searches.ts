@@ -7,6 +7,7 @@ import {
   scheduleCachedSearch,
   unscheduleCachedSearch,
 } from "../../services/scheduler";
+import { restletSinglePage } from "../../services/netsuite-client";
 import { logger } from "../../lib/logger";
 
 const runSearchBodySchema = z.object({
@@ -44,6 +45,23 @@ export async function searchRoutes(app: FastifyInstance): Promise<void> {
         error: message,
         searchId: body.searchId,
       });
+    }
+  });
+
+  // ── Single page passthrough (for large searches) ──────
+  app.post("/searches/page", async (req, reply) => {
+    const body = z.object({
+      searchId: z.string().min(1),
+      pageIndex: z.number().int().min(0).default(0),
+      pageSize: z.number().int().min(1).max(1000).default(1000),
+    }).parse(req.body);
+
+    try {
+      const result = await restletSinglePage(body.searchId, body.pageIndex, body.pageSize);
+      return reply.send(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return reply.status(500).send({ error: message, searchId: body.searchId });
     }
   });
 
