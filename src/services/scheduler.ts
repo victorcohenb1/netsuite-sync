@@ -35,6 +35,13 @@ export async function startScheduler(): Promise<void> {
     { scheduled: cachedSearches.length },
     "Scheduler started for cached searches"
   );
+
+  // Schedule sheet targets
+  const sheetTargets = await prisma.sheetTarget.findMany({ where: { enabled: true } });
+  for (const st of sheetTargets) {
+    scheduleSheetTarget(st.id, st.cronSchedule);
+  }
+  log.info({ scheduled: sheetTargets.length }, "Scheduler started for sheet targets");
 }
 
 export function scheduleDataset(key: string, cronExpression: string): void {
@@ -98,6 +105,45 @@ export function unscheduleCachedSearch(searchId: string): void {
     existing.stop();
     scheduledTasks.delete(mapKey);
     log.info({ searchId }, "Cached search unscheduled");
+  }
+}
+
+export function scheduleSheetTarget(targetId: string, cronExpression: string): void {
+  const key = `sheet:${targetId}`;
+
+  // Stop existing if any
+  const existing = scheduledTasks.get(key);
+  if (existing) {
+    existing.stop();
+    scheduledTasks.delete(key);
+  }
+
+  if (!cron.validate(cronExpression)) {
+    log.warn({ targetId, cronExpression }, "Invalid cron expression for sheet target");
+    return;
+  }
+
+  const task = cron.schedule(cronExpression, async () => {
+    log.info({ targetId }, "Sheet target cron triggered");
+    try {
+      const { syncAndWriteToSheet } = await import("./sheet-sync-orchestrator");
+      await syncAndWriteToSheet(targetId);
+    } catch (err: any) {
+      log.error({ targetId, error: err?.message }, "Sheet target cron failed");
+    }
+  });
+
+  scheduledTasks.set(key, task);
+  log.info({ targetId, cronExpression }, "Sheet target scheduled");
+}
+
+export function unscheduleSheetTarget(targetId: string): void {
+  const key = `sheet:${targetId}`;
+  const existing = scheduledTasks.get(key);
+  if (existing) {
+    existing.stop();
+    scheduledTasks.delete(key);
+    log.info({ targetId }, "Sheet target unscheduled");
   }
 }
 

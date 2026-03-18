@@ -30,6 +30,10 @@ const envSchema = z.object({
   SYNC_RETRY_ATTEMPTS: z.coerce.number().int().min(1).default(3),
   SYNC_RETRY_DELAY_MS: z.coerce.number().int().min(100).default(2000),
   SYNC_DEFAULT_CRON: z.string().default("0 */4 * * *"),
+
+  // Google Service Account for writing to Google Sheets
+  GOOGLE_SERVICE_ACCOUNT_EMAIL: z.string().email().optional(),
+  GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

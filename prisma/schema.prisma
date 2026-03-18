@@ -226,3 +226,40 @@ model InventoryByLocation {
   @@index([syncJobId])
   @@map("inventory_by_location")
 }
+
+// ─── Sheet Targets (Backend writes directly to Google Sheets) ───
+
+model SheetTarget {
+  id             String   @id @default(cuid())
+  spreadsheetId  String   @map("spreadsheet_id")
+  tabName        String   @map("tab_name")
+  searchId       String   @map("search_id")
+  colorHex       String?  @map("color_hex")
+  cronSchedule   String   @default("0 */2 * * *") @map("cron_schedule")
+  enabled        Boolean  @default(true)
+  timeZone       String   @default("America/Mexico_City") @map("time_zone")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  writeLogs SheetWriteLog[]
+
+  @@unique([spreadsheetId, tabName])
+  @@index([searchId])
+  @@index([spreadsheetId])
+  @@map("sheet_targets")
+}
+
+model SheetWriteLog {
+  id            String     @id @default(cuid())
+  sheetTargetId String     @map("sheet_target_id")
+  status        SyncStatus @default(RUNNING)
+  rowsWritten   Int?       @map("rows_written")
+  durationMs    Int?       @map("duration_ms")
+  errorMessage  String?    @map("error_message")
+  createdAt     DateTime   @default(now()) @map("created_at")
+
+  sheetTarget SheetTarget @relation(fields: [sheetTargetId], references: [id], onDelete: Cascade)
+
+  @@index([sheetTargetId, createdAt])
+  @@map("sheet_write_logs")
+}

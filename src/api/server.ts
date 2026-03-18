@@ -8,6 +8,7 @@ import { datasetRoutes } from "./routes/datasets";
 import { syncRoutes } from "./routes/sync";
 import { debugRoutes } from "./routes/debug";
 import { searchRoutes } from "./routes/searches";
+import { sheetTargetRoutes } from "./routes/sheet-targets";
 
 export async function buildServer() {
   const app = Fastify({
@@ -59,6 +60,7 @@ export async function buildServer() {
   await app.register(syncRoutes);
   await app.register(debugRoutes);
   await app.register(searchRoutes);
+  await app.register(sheetTargetRoutes);
 
   app.get("/routes", async (_req, reply) => {
     return reply.send({
