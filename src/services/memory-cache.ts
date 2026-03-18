@@ -101,65 +101,81 @@ export function startSync(searchId: string): CacheEntry {
 }
 
 async function syncAllPages(searchId: string, entry: CacheEntry): Promise<void> {
-  let pageIndex = 0;
-  let hasMore = true;
   const PAGE_SIZE = 1000;
+  const PARALLEL_PAGES = 5; // Fetch 5 pages simultaneously
 
-  log.info({ searchId }, "Background sync START");
+  log.info({ searchId, parallelPages: PARALLEL_PAGES }, "Background sync START (parallel)");
 
-  while (hasMore) {
-    try {
-      const page = await restletSinglePage(searchId, pageIndex, PAGE_SIZE);
+  // First, get page 0 to know total and columns
+  const firstPage = await restletSinglePage(searchId, 0, PAGE_SIZE);
+  entry.columns = firstPage.columns;
+  entry.total = firstPage.total;
+  entry.rows.push(...firstPage.rows);
+  entry.progress = entry.rows.length;
 
-      if (pageIndex === 0) {
-        entry.columns = page.columns;
-        entry.total = page.total;
-      }
+  if (!firstPage.hasMore || firstPage.rows.length < PAGE_SIZE) {
+    // Only 1 page, we're done
+    entry.status = "complete";
+    entry.completedAt = Date.now();
+    entry.durationMs = entry.completedAt - entry.startedAt;
+    entry.total = entry.rows.length;
+    log.info({ searchId, totalRows: entry.rows.length }, "Background sync COMPLETE (single page)");
+    return;
+  }
 
-      entry.rows.push(...page.rows);
-      entry.progress = entry.rows.length;
-      hasMore = page.hasMore;
+  // Calculate total pages needed
+  const totalPages = Math.ceil(entry.total / PAGE_SIZE);
+  let nextPage = 1;
 
-      log.info(
-        { searchId, pageIndex, pageRows: page.rows.length, progress: entry.progress, total: entry.total },
-        "Background sync page fetched"
+  log.info({ searchId, totalPages, total: entry.total }, "Starting parallel page fetching");
+
+  while (nextPage < totalPages) {
+    // Launch PARALLEL_PAGES requests simultaneously
+    const batchEnd = Math.min(nextPage + PARALLEL_PAGES, totalPages);
+    const promises = [];
+
+    for (let p = nextPage; p < batchEnd; p++) {
+      promises.push(
+        restletSinglePage(searchId, p, PAGE_SIZE).catch(async (err) => {
+          // Retry once after 2s
+          log.warn({ searchId, pageIndex: p, error: String(err) }, "Page failed, retrying");
+          await new Promise((r) => setTimeout(r, 2000));
+          return restletSinglePage(searchId, p, PAGE_SIZE).catch(() => null);
+        })
       );
+    }
 
-      pageIndex++;
+    const results = await Promise.all(promises);
 
-      // Safety cap
-      if (pageIndex > 500) {
-        log.warn({ searchId, pageIndex }, "Background sync hit max page cap");
-        break;
+    // Collect rows in order
+    for (const result of results) {
+      if (result && result.rows) {
+        entry.rows.push(...result.rows);
       }
-    } catch (err) {
-      // Retry once after 3 seconds
-      log.warn({ searchId, pageIndex, error: String(err) }, "Page fetch failed, retrying in 3s");
-      await new Promise((r) => setTimeout(r, 3000));
+    }
 
-      try {
-        const page = await restletSinglePage(searchId, pageIndex, PAGE_SIZE);
-        if (pageIndex === 0) {
-          entry.columns = page.columns;
-          entry.total = page.total;
-        }
-        entry.rows.push(...page.rows);
-        entry.progress = entry.rows.length;
-        hasMore = page.hasMore;
-        pageIndex++;
-      } catch (retryErr) {
-        throw retryErr; // Give up after 1 retry
-      }
+    entry.progress = entry.rows.length;
+    nextPage = batchEnd;
+
+    log.info(
+      { searchId, pagesCompleted: nextPage, totalPages, progress: entry.progress, total: entry.total },
+      "Background sync batch complete"
+    );
+
+    // Safety cap
+    if (nextPage > 500) {
+      log.warn({ searchId }, "Hit max page cap");
+      break;
     }
   }
 
   entry.status = "complete";
   entry.completedAt = Date.now();
   entry.durationMs = entry.completedAt - entry.startedAt;
-  entry.total = entry.rows.length; // Use actual count
+  entry.total = entry.rows.length;
 
   log.info(
-    { searchId, totalRows: entry.rows.length, durationMs: entry.durationMs, pages: pageIndex },
+    { searchId, totalRows: entry.rows.length, durationMs: entry.durationMs, pages: nextPage },
     "Background sync COMPLETE"
   );
 }
