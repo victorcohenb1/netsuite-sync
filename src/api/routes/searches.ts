@@ -14,6 +14,7 @@ const runSearchBodySchema = z.object({
   pageSize: z.number().int().min(1).max(100000).optional(),
   pageIndex: z.number().int().min(0).optional(),
   csvFallback: z.boolean().optional(),
+  countOnly: z.boolean().optional(),
 });
 
 const registerBodySchema = z.object({

@@ -87,17 +87,24 @@ export async function executeSuiteQL(
 /**
  * Execute a saved search via the NetSuite REST Web Services API with pagination.
  */
+export interface SavedSearchOptions {
+  /** If true, fetch only 1 row to get totalResults count — returns fast */
+  countOnly?: boolean;
+}
+
 export async function executeSavedSearch(
-  searchId: string
+  searchId: string,
+  options?: SavedSearchOptions
 ): Promise<SearchResult> {
+  const countOnly = options?.countOnly ?? false;
   const allRows: Record<string, unknown>[] = [];
   let offset = 0;
-  const limit = 1000;
+  const limit = countOnly ? 1 : 1000;
   let hasMore = true;
   let totalResults = 0;
   let pageNum = 0;
 
-  log.info({ searchId }, "Saved search execution START");
+  log.info({ searchId, countOnly }, "Saved search execution START");
   const searchStart = Date.now();
 
   while (hasMore) {
@@ -127,6 +134,17 @@ export async function executeSavedSearch(
 
     const rows = data.items ?? [];
     totalResults = data.totalResults ?? totalResults;
+
+    // In countOnly mode, we just need totalResults — stop after first page
+    if (countOnly) {
+      const searchDuration = Date.now() - searchStart;
+      log.info(
+        { searchId, totalResults, durationMs: searchDuration },
+        "Saved search COUNT ONLY — done after 1 request"
+      );
+      return { rows: [], totalResults, hasMore: false };
+    }
+
     allRows.push(...rows);
     hasMore = !!data.hasMore && rows.length === limit;
     offset += rows.length;

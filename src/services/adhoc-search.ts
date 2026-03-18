@@ -8,6 +8,8 @@ export interface AdHocSearchRequest {
   pageSize?: number;
   pageIndex?: number;
   csvFallback?: boolean;
+  /** If true, only return totalResults count — no rows fetched */
+  countOnly?: boolean;
 }
 
 export interface AdHocSearchResponse {
@@ -31,7 +33,7 @@ export interface AdHocSearchResponse {
 export async function runAdHocSearch(
   req: AdHocSearchRequest
 ): Promise<AdHocSearchResponse> {
-  const { searchId, csvFallback = false } = req;
+  const { searchId, csvFallback = false, countOnly = false } = req;
   const pageSize = req.pageSize ?? 1000;
   const pageIndex = req.pageIndex ?? 0;
 
@@ -40,10 +42,31 @@ export async function runAdHocSearch(
 
   // ── Try standard SuiteTalk REST saved search ──
 
-  log.info({ searchId, pageSize, pageIndex, csvFallback }, "Ad-hoc search START");
+  log.info({ searchId, pageSize, pageIndex, csvFallback, countOnly }, "Ad-hoc search START");
 
   try {
-    const result = await executeSavedSearch(searchId);
+    const result = await executeSavedSearch(searchId, { countOnly });
+
+    // countOnly mode — return just the total, no rows
+    if (countOnly) {
+      const durationMs = Date.now() - start;
+      log.info(
+        { searchId, method: "STANDARD", totalResults: result.totalResults, durationMs },
+        "Ad-hoc search END — countOnly"
+      );
+      return {
+        searchId,
+        method: "STANDARD",
+        usedCsvFallback: false,
+        rowCount: 0,
+        totalResults: result.totalResults,
+        hasMore: false,
+        columns: [],
+        rows: [],
+        durationMs,
+        standardSearchError: null,
+      };
+    }
 
     if (result.rows.length > 0) {
       const page = paginate(result.rows, pageSize, pageIndex);
