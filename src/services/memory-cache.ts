@@ -1,12 +1,11 @@
 /**
  * In-memory cache for large search results.
  *
- * Flow:
- *  1. Apps Script calls POST /searches/sync → triggers background download
- *  2. Backend downloads all pages from RESTlet (no timeout pressure)
- *  3. Apps Script polls GET /searches/:id/status every 10s
- *  4. When done, Apps Script fetches GET /searches/:id/rows?offset=0&limit=10000
- *  5. Cache auto-expires after 30 minutes
+ * Smart sync:
+ *  - If cache is complete and fresh (< FRESH_TTL) → reuse immediately
+ *  - If cache is complete but stale → re-sync in background
+ *  - If no cache → full sync
+ *  - Cache auto-expires after CACHE_TTL
  */
 
 import { restletSinglePage } from "./netsuite-client";
@@ -20,23 +19,25 @@ export interface CacheEntry {
   columns: string[];
   rows: Record<string, unknown>[];
   total: number;
-  progress: number;       // rows fetched so far
-  startedAt: number;      // Date.now()
+  progress: number;
+  startedAt: number;
   completedAt?: number;
   errorMessage?: string;
   durationMs?: number;
 }
 
-// In-memory store — survives as long as the process runs
 const cache = new Map<string, CacheEntry>();
 
-// Auto-expire after 30 minutes
-const CACHE_TTL_MS = 30 * 60 * 1000;
+// Cache keeps data for 2 hours max
+const CACHE_TTL_MS = 2 * 60 * 60 * 1000;
+
+// Data is considered "fresh" for 30 minutes — no re-sync needed
+const FRESH_TTL_MS = 30 * 60 * 1000;
 
 function cleanExpired(): void {
   const now = Date.now();
   for (const [key, entry] of cache.entries()) {
-    if (entry.status !== "syncing" && now - entry.startedAt > CACHE_TTL_MS) {
+    if (entry.status !== "syncing" && entry.completedAt && now - entry.completedAt > CACHE_TTL_MS) {
       log.info({ searchId: key }, "Cache entry expired, removing");
       cache.delete(key);
     }
@@ -67,16 +68,41 @@ export function getCacheRows(
 
 /**
  * Start a background sync for a search.
- * Downloads all pages from the RESTlet sequentially and stores in memory.
- * Returns immediately — caller should poll status.
+ *
+ * Smart logic:
+ *  - Already syncing → return current progress
+ *  - Complete + fresh (< 30 min) → return immediately, no re-sync
+ *  - Complete + stale (> 30 min) → start new sync in background
+ *  - No cache / failed → start new sync
+ *
+ * forceRefresh: true → always re-sync even if fresh
  */
-export function startSync(searchId: string): CacheEntry {
-  // If already syncing, return current status
+export function startSync(searchId: string, forceRefresh = false): CacheEntry {
   const existing = cache.get(searchId);
+
+  // Already syncing → just return progress
   if (existing && existing.status === "syncing") {
     return existing;
   }
 
+  // Complete + fresh → reuse without re-downloading
+  if (
+    existing &&
+    existing.status === "complete" &&
+    existing.completedAt &&
+    !forceRefresh
+  ) {
+    const ageMs = Date.now() - existing.completedAt;
+    if (ageMs < FRESH_TTL_MS) {
+      log.info(
+        { searchId, ageMs, totalRows: existing.total },
+        "Cache is fresh, reusing existing data (no re-sync)"
+      );
+      return existing;
+    }
+  }
+
+  // Need a new sync
   const entry: CacheEntry = {
     searchId,
     status: "syncing",
@@ -89,7 +115,7 @@ export function startSync(searchId: string): CacheEntry {
 
   cache.set(searchId, entry);
 
-  // Fire and forget — runs in background
+  // Fire and forget
   syncAllPages(searchId, entry).catch((err) => {
     log.error({ err, searchId }, "Background sync failed");
     entry.status = "failed";
@@ -102,11 +128,11 @@ export function startSync(searchId: string): CacheEntry {
 
 async function syncAllPages(searchId: string, entry: CacheEntry): Promise<void> {
   const PAGE_SIZE = 1000;
-  const PARALLEL_PAGES = 5; // Fetch 5 pages simultaneously
+  const PARALLEL_PAGES = 5;
 
   log.info({ searchId, parallelPages: PARALLEL_PAGES }, "Background sync START (parallel)");
 
-  // First, get page 0 to know total and columns
+  // First page: get total count and columns
   const firstPage = await restletSinglePage(searchId, 0, PAGE_SIZE);
   entry.columns = firstPage.columns;
   entry.total = firstPage.total;
@@ -114,7 +140,6 @@ async function syncAllPages(searchId: string, entry: CacheEntry): Promise<void> 
   entry.progress = entry.rows.length;
 
   if (!firstPage.hasMore || firstPage.rows.length < PAGE_SIZE) {
-    // Only 1 page, we're done
     entry.status = "complete";
     entry.completedAt = Date.now();
     entry.durationMs = entry.completedAt - entry.startedAt;
@@ -123,21 +148,18 @@ async function syncAllPages(searchId: string, entry: CacheEntry): Promise<void> 
     return;
   }
 
-  // Calculate total pages needed
   const totalPages = Math.ceil(entry.total / PAGE_SIZE);
   let nextPage = 1;
 
   log.info({ searchId, totalPages, total: entry.total }, "Starting parallel page fetching");
 
   while (nextPage < totalPages) {
-    // Launch PARALLEL_PAGES requests simultaneously
     const batchEnd = Math.min(nextPage + PARALLEL_PAGES, totalPages);
     const promises = [];
 
     for (let p = nextPage; p < batchEnd; p++) {
       promises.push(
         restletSinglePage(searchId, p, PAGE_SIZE).catch(async (err) => {
-          // Retry once after 2s
           log.warn({ searchId, pageIndex: p, error: String(err) }, "Page failed, retrying");
           await new Promise((r) => setTimeout(r, 2000));
           return restletSinglePage(searchId, p, PAGE_SIZE).catch(() => null);
@@ -147,7 +169,6 @@ async function syncAllPages(searchId: string, entry: CacheEntry): Promise<void> 
 
     const results = await Promise.all(promises);
 
-    // Collect rows in order
     for (const result of results) {
       if (result && result.rows) {
         entry.rows.push(...result.rows);
@@ -162,7 +183,6 @@ async function syncAllPages(searchId: string, entry: CacheEntry): Promise<void> 
       "Background sync batch complete"
     );
 
-    // Safety cap
     if (nextPage > 500) {
       log.warn({ searchId }, "Hit max page cap");
       break;

@@ -31,12 +31,18 @@ export async function searchRoutes(app: FastifyInstance): Promise<void> {
   // ── Start background sync ───────────────────────────
   // Triggers async download of ALL pages from RESTlet into memory.
   // Returns immediately. Poll /searches/:id/status for progress.
+  //
+  // Smart behavior:
+  //   - If data is fresh (< 30 min) → returns "complete" instantly, no re-download
+  //   - If data is stale or missing → starts new sync in background
+  //   - forceRefresh: true → always re-download from NetSuite
   app.post("/searches/sync", async (req, reply) => {
     const body = z.object({
       searchId: z.string().min(1),
+      forceRefresh: z.boolean().optional(),
     }).parse(req.body);
 
-    const entry = startSync(body.searchId);
+    const entry = startSync(body.searchId, body.forceRefresh ?? false);
 
     return reply.send({
       ok: true,
