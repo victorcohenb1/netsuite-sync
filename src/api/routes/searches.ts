@@ -2,6 +2,9 @@ import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { restletSinglePage } from "../../services/netsuite-client";
 import { startSync, getCacheEntry, getCacheRows } from "../../services/memory-cache";
+import { prisma } from "../../db/client";
+import { scheduleCachedSearch, unscheduleCachedSearch } from "../../services/scheduler";
+import { syncCachedSearch } from "../../services/cached-search-sync";
 import { logger } from "../../lib/logger";
 
 export async function searchRoutes(app: FastifyInstance): Promise<void> {
@@ -11,7 +14,6 @@ export async function searchRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // ── Single page passthrough (for "Probar" button) ────
-  // Fetches 1 page from RESTlet. Used for quick metadata probe.
   app.post("/searches/page", async (req, reply) => {
     const body = z.object({
       searchId: z.string().min(1),
@@ -29,13 +31,6 @@ export async function searchRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // ── Start background sync ───────────────────────────
-  // Triggers async download of ALL pages from RESTlet into memory.
-  // Returns immediately. Poll /searches/:id/status for progress.
-  //
-  // Smart behavior:
-  //   - If data is fresh (< 30 min) → returns "complete" instantly, no re-download
-  //   - If data is stale or missing → starts new sync in background
-  //   - forceRefresh: true → always re-download from NetSuite
   app.post("/searches/sync", async (req, reply) => {
     const body = z.object({
       searchId: z.string().min(1),
@@ -60,7 +55,7 @@ export async function searchRoutes(app: FastifyInstance): Promise<void> {
 
     if (!entry) {
       return reply.status(404).send({
-        error: "No sync in progress for this search. Call POST /searches/sync first.",
+        error: "No sync in progress. Call POST /searches/sync first.",
         searchId,
       });
     }
@@ -76,7 +71,6 @@ export async function searchRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // ── Fetch rows from memory cache ────────────────────
-  // Only works after sync is complete.
   app.get("/searches/:searchId/rows", async (req, reply) => {
     const { searchId } = z.object({ searchId: z.string().min(1) }).parse(req.params);
     const query = z.object({
@@ -94,15 +88,12 @@ export async function searchRoutes(app: FastifyInstance): Promise<void> {
         status: "syncing",
         progress: entry.progress,
         total: entry.total,
-        message: "Sync still in progress. Try again shortly.",
+        message: "Sync still in progress.",
       });
     }
 
     if (entry.status === "failed") {
-      return reply.status(500).send({
-        status: "failed",
-        errorMessage: entry.errorMessage,
-      });
+      return reply.status(500).send({ status: "failed", errorMessage: entry.errorMessage });
     }
 
     const data = getCacheRows(searchId, query.offset, query.limit);
@@ -111,5 +102,90 @@ export async function searchRoutes(app: FastifyInstance): Promise<void> {
     }
 
     return reply.send(data);
+  });
+
+  // ── Register search for auto-sync ───────────────────
+  // Saves to DB (survives restarts) + schedules cron + kicks off first sync
+  app.post("/searches/register", async (req, reply) => {
+    const body = z.object({
+      searchId: z.string().min(1),
+      cronSchedule: z.string().optional(),
+    }).parse(req.body);
+
+    const cron = body.cronSchedule || "0 */2 * * *";
+
+    // Save to DB (only metadata, no rows)
+    await prisma.cachedSearch.upsert({
+      where: { searchId: body.searchId },
+      create: {
+        searchId: body.searchId,
+        cronSchedule: cron,
+        enabled: true,
+        columns: [],
+        rows: [],
+        totalResults: 0,
+      },
+      update: {
+        cronSchedule: cron,
+        enabled: true,
+      },
+    });
+
+    // Schedule the cron job
+    scheduleCachedSearch(body.searchId, cron);
+
+    // Kick off first sync into memory cache (non-blocking)
+    syncCachedSearch(body.searchId);
+
+    return reply.send({
+      ok: true,
+      searchId: body.searchId,
+      cronSchedule: cron,
+      status: "registered",
+    });
+  });
+
+  // ── Deregister search ───────────────────────────────
+  app.delete("/searches/:searchId/register", async (req, reply) => {
+    const { searchId } = z.object({ searchId: z.string().min(1) }).parse(req.params);
+
+    const existing = await prisma.cachedSearch.findUnique({ where: { searchId } });
+    if (!existing) {
+      return reply.status(404).send({ error: `Not found: ${searchId}` });
+    }
+
+    await prisma.cachedSearch.delete({ where: { searchId } });
+    unscheduleCachedSearch(searchId);
+
+    return reply.send({ ok: true, searchId });
+  });
+
+  // ── List registered searches ────────────────────────
+  app.get("/searches/registered", async (_req, reply) => {
+    const searches = await prisma.cachedSearch.findMany({
+      orderBy: { searchId: "asc" },
+      select: {
+        searchId: true,
+        cronSchedule: true,
+        enabled: true,
+        createdAt: true,
+      },
+    });
+
+    // Enrich with memory cache status
+    const enriched = searches.map((s) => {
+      const cache = getCacheEntry(s.searchId);
+      return {
+        ...s,
+        cacheStatus: cache?.status ?? "no_cache",
+        cacheProgress: cache?.progress ?? 0,
+        cacheTotal: cache?.total ?? 0,
+        cacheCompletedAt: cache?.completedAt
+          ? new Date(cache.completedAt).toISOString()
+          : null,
+      };
+    });
+
+    return reply.send({ searches: enriched });
   });
 }
