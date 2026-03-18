@@ -425,6 +425,74 @@ export async function restletSinglePage(
   return { rows, columns, total, hasMore, pageIndex };
 }
 
+/**
+ * Fetch a BATCH of pages in parallel from the RESTlet.
+ * E.g., batchSize=5 fetches pages 0-4 simultaneously, returning all rows merged.
+ * This cuts total time by ~5x compared to sequential fetching.
+ */
+export async function restletBatchPages(
+  searchId: string,
+  startPage: number,
+  batchSize: number = 5,
+  pageSize: number = 1000
+): Promise<{
+  rows: Record<string, unknown>[];
+  columns: string[];
+  total: number;
+  hasMore: boolean;
+  pagesFetched: number;
+  nextPageIndex: number;
+}> {
+  log.info({ searchId, startPage, batchSize, pageSize }, "RESTlet batch START");
+
+  const pagePromises = [];
+  for (let i = 0; i < batchSize; i++) {
+    pagePromises.push(
+      restletSinglePage(searchId, startPage + i, pageSize).catch((err) => {
+        log.warn({ searchId, pageIndex: startPage + i, error: String(err) }, "Batch page failed");
+        return null;
+      })
+    );
+  }
+
+  const results = await Promise.all(pagePromises);
+
+  let allRows: Record<string, unknown>[] = [];
+  let columns: string[] = [];
+  let total = 0;
+  let lastHasMore = false;
+  let pagesFetched = 0;
+
+  for (const result of results) {
+    if (!result) break; // Stop at first failure
+    if (columns.length === 0) columns = result.columns;
+    if (result.total > total) total = result.total;
+    allRows = allRows.concat(result.rows);
+    lastHasMore = result.hasMore;
+    pagesFetched++;
+
+    // If this page returned fewer rows than pageSize, it's the last page
+    if (result.rows.length < pageSize) {
+      lastHasMore = false;
+      break;
+    }
+  }
+
+  log.info(
+    { searchId, startPage, pagesFetched, totalRows: allRows.length, total, hasMore: lastHasMore },
+    "RESTlet batch END"
+  );
+
+  return {
+    rows: allRows,
+    columns,
+    total,
+    hasMore: lastHasMore,
+    pagesFetched,
+    nextPageIndex: startPage + pagesFetched,
+  };
+}
+
 function extractRowsFromResponse(
   data: Record<string, unknown>
 ): Record<string, unknown>[] {

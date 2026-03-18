@@ -7,7 +7,7 @@ import {
   scheduleCachedSearch,
   unscheduleCachedSearch,
 } from "../../services/scheduler";
-import { restletSinglePage } from "../../services/netsuite-client";
+import { restletSinglePage, restletBatchPages } from "../../services/netsuite-client";
 import { logger } from "../../lib/logger";
 
 const runSearchBodySchema = z.object({
@@ -58,6 +58,24 @@ export async function searchRoutes(app: FastifyInstance): Promise<void> {
 
     try {
       const result = await restletSinglePage(body.searchId, body.pageIndex, body.pageSize);
+      return reply.send(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return reply.status(500).send({ error: message, searchId: body.searchId });
+    }
+  });
+
+  // ── Batch pages (parallel fetch, 5 pages at once) ─────
+  app.post("/searches/batch", async (req, reply) => {
+    const body = z.object({
+      searchId: z.string().min(1),
+      startPage: z.number().int().min(0).default(0),
+      batchSize: z.number().int().min(1).max(10).default(5),
+      pageSize: z.number().int().min(1).max(1000).default(1000),
+    }).parse(req.body);
+
+    try {
+      const result = await restletBatchPages(body.searchId, body.startPage, body.batchSize, body.pageSize);
       return reply.send(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
