@@ -26,7 +26,22 @@ export async function searchRoutes(app: FastifyInstance): Promise<void> {
       return reply.send(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      return reply.status(500).send({ error: message, searchId: body.searchId });
+      const statusCode = (err as any)?.statusCode ?? 500;
+      // Try to extract the RESTlet error message from the response body
+      let detail = message;
+      const responseBody = (err as any)?.responseBody;
+      if (responseBody) {
+        try {
+          const parsed = JSON.parse(responseBody);
+          detail = parsed?.error?.message || parsed?.message || responseBody;
+        } catch {
+          detail = responseBody;
+        }
+      }
+      return reply.status(statusCode >= 400 && statusCode < 600 ? statusCode : 500).send({
+        error: detail,
+        searchId: body.searchId,
+      });
     }
   });
 
