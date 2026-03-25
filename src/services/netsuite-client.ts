@@ -393,6 +393,7 @@ export async function restletSinglePage(
     searchId,
     pageSize,
     pageIndex,
+    csvFolderId: process.env.NETSUITE_CSV_FOLDER_ID || undefined,
   };
 
   log.info({ searchId, pageIndex, pageSize }, "RESTlet single page START");
