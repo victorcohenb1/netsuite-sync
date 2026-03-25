@@ -128,7 +128,7 @@ export function startSync(searchId: string, forceRefresh = false): CacheEntry {
 
 async function syncAllPages(searchId: string, entry: CacheEntry): Promise<void> {
   const PAGE_SIZE = 1000;
-  const PARALLEL_PAGES = 5;
+  const PARALLEL_PAGES = 2;
 
   log.info({ searchId, parallelPages: PARALLEL_PAGES }, "Background sync START (parallel)");
 
@@ -160,8 +160,8 @@ async function syncAllPages(searchId: string, entry: CacheEntry): Promise<void> 
     for (let p = nextPage; p < batchEnd; p++) {
       promises.push(
         restletSinglePage(searchId, p, PAGE_SIZE).catch(async (err) => {
-          log.warn({ searchId, pageIndex: p, error: String(err) }, "Page failed, retrying");
-          await new Promise((r) => setTimeout(r, 2000));
+          log.warn({ searchId, pageIndex: p, error: String(err) }, "Page failed, retrying after delay");
+          await new Promise((r) => setTimeout(r, 5000));
           return restletSinglePage(searchId, p, PAGE_SIZE).catch(() => null);
         })
       );

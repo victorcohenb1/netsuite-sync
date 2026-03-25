@@ -6,7 +6,7 @@ import { writeToSheet } from "./sheets-writer";
 const log = childLogger({ module: "sheet-sync-orchestrator" });
 
 const POLL_INTERVAL_MS = 5000;
-const MAX_POLL_TIME_MS = 900000; // 15 minutes
+const MAX_POLL_TIME_MS = 1800000; // 30 minutes
 
 export async function syncAndWriteToSheet(sheetTargetId: string): Promise<void> {
   const target = await prisma.sheetTarget.findUnique({ where: { id: sheetTargetId } });
