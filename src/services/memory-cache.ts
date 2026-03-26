@@ -128,7 +128,7 @@ export function startSync(searchId: string, forceRefresh = false): CacheEntry {
 
 async function syncAllPages(searchId: string, entry: CacheEntry): Promise<void> {
   const PAGE_SIZE = 1000;
-  const PARALLEL_PAGES = 2;
+  const PARALLEL_PAGES = 5;
 
   log.info({ searchId, parallelPages: PARALLEL_PAGES }, "Background sync START (parallel)");
 
