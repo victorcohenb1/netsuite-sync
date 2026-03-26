@@ -93,11 +93,36 @@ export async function writeToSheet(
   // Step 1: Get or create the tab
   const sheetId = await getOrCreateTab(sheets, spreadsheetId, tabName);
 
-  // Step 2: Clear existing data
+  // Step 2: Clear existing data and resize grid to fit new data
   await sheets.spreadsheets.values.clear({
     spreadsheetId,
     range: `'${tabName}'!A:ZZ`,
   });
+
+  // Resize grid to accommodate all rows + header + buffer for timestamp
+  const requiredRows = rows.length + 5; // data + header + timestamp + buffer
+  const requiredCols = headers.length;
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      requests: [
+        {
+          updateSheetProperties: {
+            properties: {
+              sheetId,
+              gridProperties: {
+                rowCount: requiredRows,
+                columnCount: Math.max(requiredCols, 26), // at least 26 cols (A-Z)
+              },
+            },
+            fields: "gridProperties.rowCount,gridProperties.columnCount",
+          },
+        },
+      ],
+    },
+  });
+
+  log.info({ requiredRows, requiredCols }, "Grid resized");
 
   // Step 3: Write data in chunks (50k rows max per request to avoid payload limits)
   const data2D = to2DArray(headers, rows);
