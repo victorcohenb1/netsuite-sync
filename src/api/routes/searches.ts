@@ -1,6 +1,6 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { restletSinglePage } from "../../services/netsuite-client";
+import { restletSinglePage, restletDebugSearch } from "../../services/netsuite-client";
 import { startSync, getCacheEntry, getCacheRows } from "../../services/memory-cache";
 import { prisma } from "../../db/client";
 import { scheduleCachedSearch, unscheduleCachedSearch } from "../../services/scheduler";
@@ -42,6 +42,18 @@ export async function searchRoutes(app: FastifyInstance): Promise<void> {
         error: detail,
         searchId: body.searchId,
       });
+    }
+  });
+
+  // ── Debug search (filters, columns, metadata) ──────
+  app.get("/searches/:searchId/debug", async (req, reply) => {
+    const { searchId } = req.params as { searchId: string };
+    try {
+      const result = await restletDebugSearch(searchId);
+      return reply.send(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return reply.status(500).send({ error: message, searchId });
     }
   });
 

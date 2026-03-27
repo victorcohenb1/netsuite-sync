@@ -372,6 +372,28 @@ export async function restletCsvExport(
  * Fetch a SINGLE page from the RESTlet — no accumulation, returns immediately.
  * Apps Script calls this repeatedly with incrementing pageIndex.
  */
+/**
+ * Debug a saved search — returns filters, columns, and metadata without executing.
+ */
+export async function restletDebugSearch(
+  searchId: string
+): Promise<Record<string, unknown>> {
+  const restletUrl = process.env.NETSUITE_CSV_RESTLET_URL;
+  if (!restletUrl) {
+    throw new Error("NETSUITE_CSV_RESTLET_URL is not configured");
+  }
+
+  const payload = { mode: "debug", searchId };
+
+  const headers = signRestletRequest(restletUrl, "POST");
+  const res = await fetch(restletUrl, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+  });
+  return (await handleResponse(res, `RESTletDebug[${searchId}]`)) as Record<string, unknown>;
+}
+
 export async function restletSinglePage(
   searchId: string,
   pageIndex: number,
