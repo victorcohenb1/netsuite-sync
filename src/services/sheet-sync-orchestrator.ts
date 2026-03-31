@@ -125,13 +125,23 @@ export async function syncAndWriteAllForSpreadsheet(spreadsheetId: string): Prom
     where: { spreadsheetId, enabled: true },
   });
 
-  log.info({ spreadsheetId, targetCount: targets.length }, "Writing all targets for spreadsheet");
+  log.info({ spreadsheetId, targetCount: targets.length }, "Writing all targets for spreadsheet (parallel)");
 
+  // Step 1: Kick off ALL syncs at once (just triggers, doesn't wait)
   for (const target of targets) {
-    try {
-      await syncAndWriteToSheet(target.id);
-    } catch (err: any) {
-      log.error({ sheetTargetId: target.id, tabName: target.tabName, error: err?.message }, "Failed to write target (continuing with others)");
-    }
+    startSync(target.searchId, false);
   }
+
+  // Step 2: Write each target in parallel
+  const results = await Promise.allSettled(
+    targets.map(target =>
+      syncAndWriteToSheet(target.id).catch(err => {
+        log.error({ sheetTargetId: target.id, tabName: target.tabName, error: err?.message }, "Failed to write target");
+      })
+    )
+  );
+
+  const succeeded = results.filter(r => r.status === "fulfilled").length;
+  const failed = results.filter(r => r.status === "rejected").length;
+  log.info({ spreadsheetId, succeeded, failed, total: targets.length }, "Write-all completed");
 }
