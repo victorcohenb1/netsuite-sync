@@ -99,9 +99,9 @@ export async function writeToSheet(
     range: `'${tabName}'!A:ZZ`,
   });
 
-  // Resize grid to accommodate all rows + header + buffer for timestamp
+  // Resize grid to fit data exactly (avoid exceeding 10M cell limit)
   const requiredRows = rows.length + 5; // data + header + timestamp + buffer
-  const requiredCols = headers.length;
+  const requiredCols = Math.max(headers.length, 1);
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId,
     requestBody: {
@@ -112,7 +112,7 @@ export async function writeToSheet(
               sheetId,
               gridProperties: {
                 rowCount: requiredRows,
-                columnCount: Math.max(requiredCols, 26), // at least 26 cols (A-Z)
+                columnCount: requiredCols,
               },
             },
             fields: "gridProperties.rowCount,gridProperties.columnCount",
@@ -122,7 +122,7 @@ export async function writeToSheet(
     },
   });
 
-  log.info({ requiredRows, requiredCols }, "Grid resized");
+  log.info({ requiredRows, requiredCols, totalCells: requiredRows * requiredCols }, "Grid resized");
 
   // Step 3: Write data in chunks (50k rows max per request to avoid payload limits)
   const data2D = to2DArray(headers, rows);
