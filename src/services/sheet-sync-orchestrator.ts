@@ -5,7 +5,7 @@ import { writeToSheet } from "./sheets-writer";
 
 const log = childLogger({ module: "sheet-sync-orchestrator" });
 
-const POLL_INTERVAL_MS = 5000;
+const POLL_INTERVAL_MS = 1000;
 const MAX_POLL_TIME_MS = 3600000; // 60 minutes
 
 export async function syncAndWriteToSheet(sheetTargetId: string): Promise<void> {
@@ -125,14 +125,28 @@ export async function syncAndWriteAllForSpreadsheet(spreadsheetId: string): Prom
     where: { spreadsheetId, enabled: true },
   });
 
-  log.info({ spreadsheetId, targetCount: targets.length }, "Writing all targets for spreadsheet (parallel)");
+  log.info({ spreadsheetId, targetCount: targets.length }, "Writing all targets for spreadsheet (sequential sync, parallel write)");
 
-  // Step 1: Kick off ALL syncs at once (just triggers, doesn't wait)
+  // Sync searches ONE AT A TIME to avoid SSS_REQUEST_LIMIT_EXCEEDED
+  // Each sync already uses parallel pages internally
   for (const target of targets) {
-    startSync(target.searchId, false);
+    try {
+      log.info({ searchId: target.searchId, tabName: target.tabName }, "Syncing search");
+      startSync(target.searchId, false);
+
+      // Wait for this sync to complete before starting the next
+      const pollStart = Date.now();
+      while (Date.now() - pollStart < MAX_POLL_TIME_MS) {
+        const entry = getCacheEntry(target.searchId);
+        if (entry?.status === "complete" || entry?.status === "failed") break;
+        await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+      }
+    } catch (err: any) {
+      log.error({ searchId: target.searchId, error: err?.message }, "Sync failed, continuing");
+    }
   }
 
-  // Step 2: Write each target in parallel
+  // Now ALL data is cached — write all sheets in parallel (no NetSuite calls, just Google Sheets API)
   const results = await Promise.allSettled(
     targets.map(target =>
       syncAndWriteToSheet(target.id).catch(err => {
