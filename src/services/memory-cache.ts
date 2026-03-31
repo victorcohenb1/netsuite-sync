@@ -85,11 +85,12 @@ export function startSync(searchId: string, forceRefresh = false): CacheEntry {
     return existing;
   }
 
-  // Complete + fresh → reuse without re-downloading
+  // Complete + fresh + has data → reuse without re-downloading
   if (
     existing &&
     existing.status === "complete" &&
     existing.completedAt &&
+    existing.total > 0 &&
     !forceRefresh
   ) {
     const ageMs = Date.now() - existing.completedAt;
